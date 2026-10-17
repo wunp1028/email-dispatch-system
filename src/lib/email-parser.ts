@@ -18,12 +18,119 @@ export interface ParsedEmailResult {
 }
 
 /**
+ * 解碼 RFC 2047 MIME Encoded-Word (例如 =?UTF-8?B?56ys5LiJ...==?=)
+ */
+export function decodeRFC2047(text: string): string {
+  if (!text) return '';
+  // 多個連續 encoded-word 之間如果只有空格，RFC 規定應忽略中間的空白
+  const cleanedText = text.replace(/(\?=\s+=\?)/g, '?==?');
+  const regex = /=\?([^?]+)\?([BQbq])\?([^?]+)\?=/g;
+
+  return cleanedText.replace(regex, (match, charset, encoding, data) => {
+    try {
+      const enc = encoding.toUpperCase();
+      if (enc === 'B') {
+        return Buffer.from(data, 'base64').toString('utf-8');
+      } else if (enc === 'Q') {
+        const qp = data
+          .replace(/_/g, ' ')
+          .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+        return decodeURIComponent(escape(qp));
+      }
+    } catch {
+      return match;
+    }
+    return match;
+  });
+}
+
+/**
+ * 解碼 Quoted-Printable 內文
+ */
+export function decodeQuotedPrintable(str: string): string {
+  try {
+    const softRemoved = str.replace(/=\r?\n/g, '');
+    return softRemoved.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => {
+      return String.fromCharCode(parseInt(hex, 16));
+    });
+  } catch {
+    return str;
+  }
+}
+
+/**
+ * 自動識別並解碼 MIME 內文 (包含 Base64、Quoted-Printable、Multipart text/plain 抽取)
+ */
+export function decodeMimeBody(rawBody: string): string {
+  if (!rawBody) return '';
+
+  let body = rawBody;
+
+  // 1. 若內容包含 MIME multipart 分段標頭，尋找 text/plain 段落
+  if (/content-type:\s*text\/plain/i.test(body)) {
+    const parts = body.split(/--[a-zA-Z0-9_\-]+/);
+    for (const part of parts) {
+      if (/content-type:\s*text\/plain/i.test(part)) {
+        const isBase64 = /content-transfer-encoding:\s*base64/i.test(part);
+        const isQP = /content-transfer-encoding:\s*quoted-printable/i.test(part);
+
+        const headerBodySplit = part.split(/\r?\n\r?\n/);
+        if (headerBodySplit.length > 1) {
+          const content = headerBodySplit.slice(1).join('\n\n').trim();
+          if (isBase64) {
+            try {
+              const decoded = Buffer.from(content.replace(/\s+/g, ''), 'base64').toString('utf-8');
+              if (decoded) return decoded;
+            } catch {}
+          } else if (isQP) {
+            return decodeQuotedPrintable(content);
+          }
+          return content;
+        }
+      }
+    }
+  }
+
+  // 2. 檢查段落內是否標註為 base64
+  if (/content-transfer-encoding:\s*base64/i.test(body)) {
+    const split = body.split(/\r?\n\r?\n/);
+    const content = split.length > 1 ? split.slice(1).join('\n\n') : body;
+    try {
+      const decoded = Buffer.from(content.replace(/\s+/g, ''), 'base64').toString('utf-8');
+      if (decoded) return decoded;
+    } catch {}
+  }
+
+  // 3. 檢查段落內是否標註為 quoted-printable
+  if (/content-transfer-encoding:\s*quoted-printable/i.test(body)) {
+    const split = body.split(/\r?\n\r?\n/);
+    const content = split.length > 1 ? split.slice(1).join('\n\n') : body;
+    return decodeQuotedPrintable(content);
+  }
+
+  // 4. 純 Base64 字串檢驗 (常見於 Gmail/Outlook 直接轉發出的純文字段落)
+  const trimmed = body.trim();
+  if (/^[A-Za-z0-9+/=\r\n]{24,}$/.test(trimmed) && !trimmed.includes(' ')) {
+    try {
+      const decoded = Buffer.from(trimmed.replace(/\s+/g, ''), 'base64').toString('utf-8');
+      if (decoded && (/[\u4e00-\u9fa5]/.test(decoded) || decoded.includes('@') || decoded.includes('http'))) {
+        return decoded;
+      }
+    } catch {}
+  }
+
+  // 5. 解碼內文中可能殘留的 RFC 2047 編碼
+  return decodeRFC2047(body);
+}
+
+/**
  * 剝離 Re:/Fwd: 等郵件前綴，取得乾淨主旨
  */
 export function cleanEmailSubject(subject: string): string {
   if (!subject) return '';
+  // 先進行 RFC 2047 解碼 (例如 =?UTF-8?B?...?=)
+  let cleaned = decodeRFC2047(subject).trim();
   // 循環剝離 Re:, Fwd:, FW:, 回復:, 回覆:, 轉寄:
-  let cleaned = subject.trim();
   const prefixRegex = /^(re|fwd|fw|回复|回覆|轉寄)\s*[:：]\s*/i;
   while (prefixRegex.test(cleaned)) {
     cleaned = cleaned.replace(prefixRegex, '').trim();
@@ -266,7 +373,8 @@ export function parseIncomingEmail(
   roster: TeamMember[]
 ): ParsedEmailResult {
   const cleanSubject = cleanEmailSubject(rawEmail.subject || '');
-  const cleanContent = extractLatestReplyContent(rawEmail.body || '');
+  const decodedBody = decodeMimeBody(rawEmail.body || '');
+  const cleanContent = extractLatestReplyContent(decodedBody);
   const receivedAt = rawEmail.date ? new Date(rawEmail.date).toISOString() : new Date().toISOString();
 
   // 合併主旨與最新內文共同搜尋 @人員 與 優先級
@@ -298,6 +406,7 @@ export function parseIncomingEmail(
   if (!senderName) {
     senderName = senderEmail.split('@')[0] || 'Unknown';
   }
+  senderName = decodeRFC2047(senderName);
 
   return {
     cleanSubject,

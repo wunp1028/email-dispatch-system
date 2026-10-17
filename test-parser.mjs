@@ -79,9 +79,21 @@ function assert(cond, name) {
   }
 }
 
-console.log('=== 1. 測試主旨前綴剝離 (cleanEmailSubject) ===');
+console.log('=== 1. 測試主旨前綴剝離與 RFC 2047 解碼 (cleanEmailSubject) ===');
 assert(cleanEmailSubject('Re: Fwd: 生產系統異常') === '生產系統異常', 'Strip Re: Fwd:');
 assert(cleanEmailSubject('回覆: [緊急] 伺服器告警') === '[緊急] 伺服器告警', 'Strip Chinese 回覆:');
+assert(cleanEmailSubject('=?UTF-8?B?56ys5LiJ5qyh6Kej5p6Q77yM5pyJ6L6m5rOV5ZeO?=') === '第三次解析，有辦法嗎', 'Decode RFC 2047 Base64 subject');
+
+console.log('\n=== 1.5. 測試 RFC 2047 與 Base64 內文解析指定派單 ===');
+const base64Body = Buffer.from('請 @建宏 P1 協助排查伺服器異常，感謝！').toString('base64');
+const parsedMimeEmail = parseIncomingEmail({
+  from: 'client@vip-client.com',
+  subject: '=?UTF-8?B?56ys5LiJ5qyh6Kej5p6Q77yM5pyJ6L6m5rOV5ZeO?=',
+  body: base64Body,
+}, mockRoster);
+assert(parsedMimeEmail.cleanSubject === '第三次解析，有辦法嗎', 'Subject correctly decoded from base64');
+assert(parsedMimeEmail.mentions.length === 1 && parsedMimeEmail.mentions[0].member.name === '建宏', 'Successfully detected @建宏 from decoded base64 body');
+assert(parsedMimeEmail.mentions[0].priority === 'P1', 'Successfully detected P1 priority from decoded base64 body');
 
 console.log('\n=== 2. 測試歷史引文截斷 (extractLatestReplyContent) ===');
 const emailWithQuotes = `這是最新回覆內容，請注意。
