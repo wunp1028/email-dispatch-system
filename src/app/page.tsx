@@ -31,6 +31,7 @@ export default function DashboardPage() {
   const [whitelist, setWhitelist] = useState<WhitelistRule[]>([]);
   const [mailLogs, setMailLogs] = useState<MailLog[]>([]);
   const [crownHolderId, setCrownHolderId] = useState<string | null>(null);
+  const [storageStatus, setStorageStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -53,12 +54,18 @@ export default function DashboardPage() {
   const fetchAllData = useCallback(async () => {
     try {
       setRefreshing(true);
-      const [tasksRes, rosterRes, whitelistRes, logsRes] = await Promise.all([
+      const [tasksRes, rosterRes, whitelistRes, logsRes, statusRes] = await Promise.all([
         fetch('/api/tasks'),
         fetch('/api/roster'),
         fetch('/api/whitelist'),
         fetch('/api/logs'),
+        fetch('/api/status').catch(() => null),
       ]);
+
+      if (statusRes && statusRes.ok) {
+        const sData = await statusRes.json();
+        setStorageStatus(sData);
+      }
 
       if (tasksRes.ok) {
         const tasksData = await tasksRes.json();
@@ -353,9 +360,25 @@ export default function DashboardPage() {
                 </span>
               </div>
               <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                <span className="flex items-center gap-1 text-emerald-600 font-medium">
-                  <Database className="w-3 h-3" /> Cloudflare R2 / KV / Local Fallback
-                </span>
+                {storageStatus?.r2Status === 'CONNECTED' ? (
+                  <span className="flex items-center gap-1 text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+                    Cloudflare R2 雲端連線中 ({storageStatus.r2Bucket})
+                  </span>
+                ) : storageStatus?.r2Status === 'ERROR' ? (
+                  <span
+                    className="flex items-center gap-1 text-rose-700 font-semibold bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200 cursor-help"
+                    title={`R2 連線失敗: ${storageStatus.r2Error || '請檢查環境變數'}`}
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+                    R2 連線異常 (點擊查看: {storageStatus.r2Error})
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-amber-700 font-medium bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                    <Database className="w-3.5 h-3.5 text-amber-600" />
+                    本機暫存模式 (未設定 R2 環境變數)
+                  </span>
+                )}
               </div>
             </div>
           </div>
