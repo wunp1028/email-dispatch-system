@@ -206,24 +206,43 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// 判斷是否設定了 Cloudflare R2
-function getR2Client(): { client: S3Client; bucket: string; key: string } | null {
-  const accountId = process.env.CF_R2_ACCOUNT_ID;
-  const accessKeyId = process.env.CF_R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.CF_R2_SECRET_ACCESS_KEY;
-  const bucket = process.env.CF_R2_BUCKET;
+export function cleanR2Config() {
+  const rawAccountId = process.env.CF_R2_ACCOUNT_ID;
+  const rawAccessKeyId = process.env.CF_R2_ACCESS_KEY_ID;
+  const rawSecretAccessKey = process.env.CF_R2_SECRET_ACCESS_KEY;
+  const rawBucket = process.env.CF_R2_BUCKET;
   const key = process.env.CF_R2_KEY || 'system_state.json';
 
-  if (accountId && accessKeyId && secretAccessKey && bucket) {
+  if (!rawAccountId || !rawAccessKeyId || !rawSecretAccessKey || !rawBucket) {
+    return null;
+  }
+
+  // 自動淨化 Account ID (去除可能誤貼的 https://、.r2.cloudflarestorage.com、引號與斜線)
+  let accountId = rawAccountId.trim().replace(/^["']|["']$/g, '');
+  accountId = accountId.replace(/^https?:\/\//i, '');
+  accountId = accountId.replace(/\.r2\.cloudflarestorage\.com.*$/i, '');
+  accountId = accountId.replace(/\/+$/g, '').trim();
+
+  const accessKeyId = rawAccessKeyId.trim().replace(/^["']|["']$/g, '');
+  const secretAccessKey = rawSecretAccessKey.trim().replace(/^["']|["']$/g, '');
+  const bucket = rawBucket.trim().replace(/^["']|["']$/g, '');
+
+  return { accountId, accessKeyId, secretAccessKey, bucket, key };
+}
+
+// 判斷是否設定了 Cloudflare R2
+function getR2Client(): { client: S3Client; bucket: string; key: string } | null {
+  const conf = cleanR2Config();
+  if (conf) {
     const client = new S3Client({
       region: 'auto',
-      endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+      endpoint: `https://${conf.accountId}.r2.cloudflarestorage.com`,
       credentials: {
-        accessKeyId,
-        secretAccessKey,
+        accessKeyId: conf.accessKeyId,
+        secretAccessKey: conf.secretAccessKey,
       },
     });
-    return { client, bucket, key };
+    return { client, bucket: conf.bucket, key: conf.key };
   }
   return null;
 }
