@@ -34,7 +34,7 @@ export function decodeRFC2047(text: string): string {
       } else if (enc === 'Q') {
         const qp = data
           .replace(/_/g, ' ')
-          .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+          .replace(/=([0-9A-Fa-f]{2})/g, (_: string, hex: string) => String.fromCharCode(parseInt(hex, 16)));
         return decodeURIComponent(escape(qp));
       }
     } catch {
@@ -50,7 +50,7 @@ export function decodeRFC2047(text: string): string {
 export function decodeQuotedPrintable(str: string): string {
   try {
     const softRemoved = str.replace(/=\r?\n/g, '');
-    return softRemoved.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => {
+    return softRemoved.replace(/=([0-9A-Fa-f]{2})/g, (_: string, hex: string) => {
       return String.fromCharCode(parseInt(hex, 16));
     });
   } catch {

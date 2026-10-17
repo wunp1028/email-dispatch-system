@@ -17,6 +17,7 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
   crownHolderId,
   onUpdateMember,
   onAddMember,
+  onEditMember,
 }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newName, setNewName] = useState('');

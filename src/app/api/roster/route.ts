@@ -102,6 +102,12 @@ export async function PATCH(req: NextRequest) {
       return member;
     });
 
+    return NextResponse.json(result);
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
 export async function DELETE(req: NextRequest) {
   try {
     const { searchParams } = req.nextUrl;
