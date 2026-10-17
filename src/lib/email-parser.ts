@@ -12,9 +12,12 @@ export interface ParsedEmailResult {
   senderEmail: string;
   receivedAt: string;
   mentions: ParsedMention[];
+  bodyMentions: ParsedMention[];
+  subjectMentions: ParsedMention[];
   defaultPriority: Priority;
   statusCommand?: TaskStatus;
   referencedTicketNumber?: string;
+  isReply: boolean;
 }
 
 /**
@@ -139,6 +142,50 @@ export function cleanEmailSubject(subject: string): string {
 }
 
 /**
+ * 標準化主旨比對字串（深度去除郵件轉發前綴、系統標籤、票號、空白，以利精準匹配既有工單）
+ */
+export function normalizeSubjectForMatching(subject: string): string {
+  if (!subject) return '';
+  let str = cleanEmailSubject(subject);
+  // 移除常見閘道或標記：[外部], [EXT], [External], 【外部】, [SPAM]
+  str = str.replace(/\[\s*(外部|EXT|External|Spam)\s*\]/gi, '');
+  str = str.replace(/【\s*(外部|EXT|External|Spam)\s*】/gi, '');
+  // 移除工單號碼：[TICK-20261017-001]
+  str = str.replace(/\[\s*TICK-\d{8}-\d+\s*\]/gi, '');
+  str = str.replace(/TICK-\d{8}-\d+/gi, '');
+  // 移除優先級標籤：[P1]~[P5]
+  str = str.replace(/\[\s*P[1-5]\s*\]/gi, '');
+  // 移除狀態指令標籤：[已結案], #已結案 等
+  str = str.replace(/(?:#|＃|\[|【)\s*(結案|已結案|關閉|CLOSE|CLOSED|已處理|處理完畢|RESOLVED|DONE|處理中|進行中|IN_PROGRESS|待處理|PENDING)\s*(?:\]|】)?/gi, '');
+  // 壓縮多餘空白並轉小寫
+  return str.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * 檢查是否為回覆信件 (依主旨前綴、引文結構、In-Reply-To 等標記)
+ */
+export function isReplyEmail(
+  subject: string,
+  body: string,
+  inReplyTo?: string,
+  referencedTicket?: string
+): boolean {
+  if (referencedTicket) return true;
+  if (inReplyTo && inReplyTo.trim().length > 0) return true;
+  if (/^(re|fwd|fw|回复|回覆|轉寄)\s*[:：]/i.test(subject.trim())) return true;
+  if (
+    /On\s+.+wrote\s*:\s*$/im.test(body) ||
+    /在\s+.+寫道\s*[:：]/m.test(body) ||
+    /於\s+.+寫道\s*[:：]/m.test(body) ||
+    /-+\s*(original\s*message|原始郵件)\s*-+/im.test(body) ||
+    /^(from|寄件者|寄件人|發件人)\s*[:：]/im.test(body)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * 剝離歷史引文，僅保留最上方最新一封回覆內文
  */
 export function extractLatestReplyContent(body: string): string {
@@ -186,21 +233,42 @@ export function extractLatestReplyContent(body: string): string {
 }
 
 /**
- * 解析內文或主旨中提及的狀態回報指令 (#處理中, #已處理, #結案, #待處理)
+ * 解析內文或主旨中提及的狀態回報指令
+ * 支援: #已結案, 已結案, [已結案], #已處理, 已處理, #處理中, 處理中, #待處理, 待處理 等
  */
 export function extractStatusCommand(text: string): TaskStatus | undefined {
   if (!text) return undefined;
+  const normalized = text.trim();
 
-  if (/(#|＃)(處理中|進行中|IN_PROGRESS|INPROGRESS)/i.test(text)) {
-    return 'IN_PROGRESS';
-  }
-  if (/(#|＃)(已處理|處理完畢|RESOLVED|DONE)/i.test(text)) {
-    return 'RESOLVED';
-  }
-  if (/(#|＃)(結案|已結案|CLOSE|CLOSED)/i.test(text)) {
+  // 1. 最高優先級：明確指令標籤 (#, ＃, [, 【, (, （)
+  if (/(?:#|＃|\[|【|\(|（)\s*(結案|已結案|關閉|CLOSE|CLOSED)\s*(?:\]|】|\)|）)?/i.test(normalized)) {
     return 'CLOSED';
   }
-  if (/(#|＃)(待處理|PENDING)/i.test(text)) {
+  if (/(?:#|＃|\[|【|\(|（)\s*(已處理|處理完畢|處理完成|已修復|已搞定|已解決|RESOLVED|DONE)\s*(?:\]|】|\)|）)?/i.test(normalized)) {
+    return 'RESOLVED';
+  }
+  if (/(?:#|＃|\[|【|\(|（)\s*(處理中|進行中|正在處理|排查中|IN_PROGRESS|INPROGRESS)\s*(?:\]|】|\)|）)?/i.test(normalized)) {
+    return 'IN_PROGRESS';
+  }
+  if (/(?:#|＃|\[|【|\(|（)\s*(待處理|重新開啟|重開|REOPEN|PENDING)\s*(?:\]|】|\)|）)?/i.test(normalized)) {
+    return 'PENDING';
+  }
+
+  // 2. 自然語言關鍵詞
+  // 結案 (例如: "已結案", "這題已結案，謝謝", "確認結案", "請結案")
+  if (/(?:已結案|確認結案|已結案了|請結案|\bclosed?\b)/i.test(normalized)) {
+    return 'CLOSED';
+  }
+  // 已處理 (例如: "已處理完畢", "已修復", "已經處理完成", "已解決", "已搞定")
+  if (/(?:已處理完畢|已處理完成|處理完畢|處理完成|已修復|已搞定|已解決|已處理|\bresolved\b|\bdone\b)/i.test(normalized)) {
+    return 'RESOLVED';
+  }
+  // 處理中 (例如: "正在處理中", "目前處理中", "排查中", "進行中")
+  if (/(?:正在處理|處理中|排查中|進行中|\bin_?progress\b)/i.test(normalized)) {
+    return 'IN_PROGRESS';
+  }
+  // 待處理 (例如: "待處理", "重新開啟", "重開工單")
+  if (/(?:待處理|重新開啟|重開工單|\bpending\b|\breopen\b)/i.test(normalized)) {
     return 'PENDING';
   }
 
@@ -369,6 +437,7 @@ export function parseIncomingEmail(
     subject: string;
     body: string;
     date?: string;
+    inReplyTo?: string;
   },
   roster: TeamMember[]
 ): ParsedEmailResult {
@@ -377,18 +446,42 @@ export function parseIncomingEmail(
   const cleanContent = extractLatestReplyContent(decodedBody);
   const receivedAt = rawEmail.date ? new Date(rawEmail.date).toISOString() : new Date().toISOString();
 
-  // 合併主旨與最新內文共同搜尋 @人員 與 優先級
-  const combinedText = `${cleanSubject}\n${cleanContent}`;
-  const { mentions, globalPriority } = parseMentionsAndPriority(combinedText, roster);
+  // 1. 分別解析主旨點名與最新內文點名
+  const { mentions: subjectMentions, globalPriority } = parseMentionsAndPriority(cleanSubject, roster);
+  const { mentions: bodyMentions } = parseMentionsAndPriority(cleanContent, roster);
 
-  // 解析狀態回報指令
-  const statusCommand = extractStatusCommand(cleanContent);
+  // 合併所有點名（內文點名優先）
+  const allMentionsMap = new Map<string, ParsedMention>();
+  bodyMentions.forEach((m) => allMentionsMap.set(m.member.id, m));
+  subjectMentions.forEach((m) => {
+    if (!allMentionsMap.has(m.member.id)) {
+      allMentionsMap.set(m.member.id, m);
+    }
+  });
+  const mentions = Array.from(allMentionsMap.values());
 
-  // 解析票號
+  // 2. 解析票號 (依序從主旨、內文、原始主旨中尋找)
   const referencedTicketNumber =
     extractTicketNumber(cleanSubject) ||
     extractTicketNumber(cleanContent) ||
     extractTicketNumber(rawEmail.subject || '');
+
+  // 3. 判定是否為回覆信件
+  const isReply = isReplyEmail(
+    rawEmail.subject || '',
+    rawEmail.body || '',
+    rawEmail.inReplyTo,
+    referencedTicketNumber
+  );
+
+  // 4. 解析狀態指令 (優先從最新回覆內文尋找，找不到再檢查主旨)
+  let statusCommand = extractStatusCommand(cleanContent);
+  if (!statusCommand) {
+    statusCommand = extractStatusCommand(cleanSubject);
+  }
+  if (!statusCommand) {
+    statusCommand = extractStatusCommand(rawEmail.subject || '');
+  }
 
   // 寄件者名稱抽取 (處理 "John Doe <john@example.com>" 格式)
   let senderName = rawEmail.fromName || '';
@@ -415,8 +508,11 @@ export function parseIncomingEmail(
     senderEmail,
     receivedAt,
     mentions,
+    bodyMentions,
+    subjectMentions,
     defaultPriority: globalPriority,
     statusCommand,
     referencedTicketNumber,
+    isReply,
   };
 }

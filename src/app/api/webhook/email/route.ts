@@ -4,6 +4,7 @@ import {
   parseIncomingEmail,
   checkSenderWhitelist,
   calculateDueDate,
+  normalizeSubjectForMatching,
 } from '@/lib/email-parser';
 import { generateTicketNumber } from '@/lib/utils';
 import { Task, TaskHistoryItem, MailLog } from '@/types/store';
@@ -59,55 +60,134 @@ export async function POST(req: NextRequest) {
 
       // 2. 解析郵件
       const parsed = parseIncomingEmail(
-        { from, fromName, subject, body, date },
+        { from, fromName, subject, body, date, inReplyTo },
         state.roster
       );
 
-      // 3. 檢查是否為針對既有工單的回覆更新 (例如含 #已處理, #處理中, #結案)
+      // 3. 檢查是否為針對既有工單的回覆更新或討論
       let targetTask: Task | undefined;
+
+      // 3.1 優先以明確票號 (TICK-20261017-001) 尋找
       if (parsed.referencedTicketNumber) {
         targetTask = state.tasks.find((t) => t.ticketNumber === parsed.referencedTicketNumber);
       }
-      if (!targetTask && parsed.cleanSubject) {
-        // 比對乾淨主旨相同的近期未結案工單
+
+      // 3.2 依據郵件標頭 inReplyTo 比對既有工單的 messageId
+      if (!targetTask && inReplyTo) {
         targetTask = state.tasks.find(
-          (t) => t.status !== 'CLOSED' && t.cleanSubject === parsed.cleanSubject
+          (t) => t.messageId && (t.messageId === inReplyTo || inReplyTo.includes(t.messageId))
         );
       }
 
-      if (targetTask && parsed.statusCommand) {
-        // 狀態更新流程
-        const oldStatus = targetTask.status;
-        const newStatus = parsed.statusCommand;
-        targetTask.status = newStatus;
-        targetTask.updatedAt = new Date().toISOString();
+      // 3.3 依據標準化主旨比對 (先找未結案工單，若未找到再找已結案)
+      if (!targetTask && parsed.cleanSubject) {
+        const normCurrent = normalizeSubjectForMatching(parsed.cleanSubject);
+        if (normCurrent) {
+          // 先在未結案中尋找精確相符者
+          targetTask = state.tasks.find(
+            (t) =>
+              t.status !== 'CLOSED' &&
+              (normalizeSubjectForMatching(t.cleanSubject) === normCurrent ||
+               normalizeSubjectForMatching(t.mailSubject) === normCurrent)
+          );
 
-        // 調整人員 active tasks 計數
-        const member = state.roster.find((m) => m.id === targetTask!.assigneeId);
-        if (member) {
-          if (
-            (oldStatus === 'PENDING' || oldStatus === 'IN_PROGRESS') &&
-            (newStatus === 'RESOLVED' || newStatus === 'CLOSED')
-          ) {
-            member.currentActiveTasks = Math.max(0, member.currentActiveTasks - 1);
-            if (newStatus === 'CLOSED') {
-              member.completedCount += 1;
-            }
-          } else if (
-            (oldStatus === 'RESOLVED' || oldStatus === 'CLOSED') &&
-            (newStatus === 'PENDING' || newStatus === 'IN_PROGRESS')
-          ) {
-            member.currentActiveTasks += 1;
+          // 若有狀態指令，擴大比對全部工單 (例如重啟已結案，或重複確認結案)
+          if (!targetTask && parsed.statusCommand) {
+            targetTask = state.tasks.find(
+              (t) =>
+                normalizeSubjectForMatching(t.cleanSubject) === normCurrent ||
+                normalizeSubjectForMatching(t.mailSubject) === normCurrent
+            );
           }
-          member.updatedAt = new Date().toISOString();
+
+          // 核心關鍵詞子字串模糊比對（長度大於 6 字元）
+          if (!targetTask && normCurrent.length >= 6) {
+            targetTask = state.tasks.find((t) => {
+              const normTask = normalizeSubjectForMatching(t.cleanSubject);
+              return (
+                normTask.length >= 6 &&
+                (normCurrent.includes(normTask) || normTask.includes(normCurrent))
+              );
+            });
+          }
         }
+      }
+
+      // ===== 情境一：成功匹配到既有工單 =====
+      if (targetTask) {
+        const oldStatus = targetTask.status;
+
+        // 1A. 狀態變更 (例如: #已結案, 已結案, 處理中, #已處理, #待處理)
+        if (parsed.statusCommand) {
+          const newStatus = parsed.statusCommand;
+          targetTask.status = newStatus;
+          targetTask.updatedAt = new Date().toISOString();
+
+          // 調整受派人員 active tasks 計數
+          const member = state.roster.find((m) => m.id === targetTask!.assigneeId);
+          if (member) {
+            if (
+              (oldStatus === 'PENDING' || oldStatus === 'IN_PROGRESS') &&
+              (newStatus === 'RESOLVED' || newStatus === 'CLOSED')
+            ) {
+              member.currentActiveTasks = Math.max(0, member.currentActiveTasks - 1);
+              if (newStatus === 'CLOSED') {
+                member.completedCount += 1;
+              }
+            } else if (
+              (oldStatus === 'RESOLVED' || oldStatus === 'CLOSED') &&
+              (newStatus === 'PENDING' || newStatus === 'IN_PROGRESS')
+            ) {
+              member.currentActiveTasks += 1;
+              if (oldStatus === 'CLOSED') {
+                member.completedCount = Math.max(0, member.completedCount - 1);
+              }
+            }
+            member.updatedAt = new Date().toISOString();
+          }
+
+          const historyItem: TaskHistoryItem = {
+            id: `hist-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            action: 'STATUS_CHANGE',
+            actor: parsed.senderName || parsed.senderEmail,
+            details: `由 Email 回信自動更新狀態為 [${newStatus}] (原狀態: [${oldStatus}])。摘要: "${parsed.cleanContent.substring(0, 80)}"`,
+          };
+          targetTask.history.unshift(historyItem);
+
+          const updateLog: MailLog = {
+            id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            sender: from,
+            subject: subject,
+            action: 'UPDATED',
+            details: `回信成功更新工單 ${targetTask.ticketNumber} 狀態為 ${newStatus}`,
+            ticketNumbers: [targetTask.ticketNumber],
+            rawSnippet: parsed.cleanContent.substring(0, 150),
+          };
+          state.mailLogs.unshift(updateLog);
+
+          return {
+            status: 'UPDATED',
+            ticketNumber: targetTask.ticketNumber,
+            newStatus,
+            message: `工單 ${targetTask.ticketNumber} 狀態已更新為 ${newStatus}`,
+          };
+        }
+
+        // 1B. 郵件回信討論（無狀態指令，例如「好的已收到」、「正在查」）
+        // 核心原則：絕不重複建立工單！追加紀錄至該工單歷程
+        if (targetTask.status === 'PENDING') {
+          targetTask.status = 'IN_PROGRESS'; // 有人回信，自動晉升為進行中
+        }
+        targetTask.updatedAt = new Date().toISOString();
 
         const historyItem: TaskHistoryItem = {
           id: `hist-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           timestamp: new Date().toISOString(),
-          action: 'STATUS_CHANGE',
+          action: 'NOTE_UPDATED',
           actor: parsed.senderName || parsed.senderEmail,
-          details: `由 Email 回信自動更新狀態為 [${newStatus}] (原狀態: [${oldStatus}])`,
+          details: `收到郵件回覆討論: "${parsed.cleanContent.substring(0, 150)}"`,
         };
         targetTask.history.unshift(historyItem);
 
@@ -117,17 +197,37 @@ export async function POST(req: NextRequest) {
           sender: from,
           subject: subject,
           action: 'UPDATED',
-          details: `回信成功更新工單 ${targetTask.ticketNumber} 狀態為 ${newStatus}`,
+          details: `郵件回覆討論已記錄至既有工單 ${targetTask.ticketNumber}`,
           ticketNumbers: [targetTask.ticketNumber],
           rawSnippet: parsed.cleanContent.substring(0, 150),
         };
         state.mailLogs.unshift(updateLog);
 
         return {
-          status: 'UPDATED',
+          status: 'FOLLOW_UP',
           ticketNumber: targetTask.ticketNumber,
-          newStatus,
-          message: `工單 ${targetTask.ticketNumber} 狀態已更新為 ${newStatus}`,
+          message: `郵件回覆已追加至工單 ${targetTask.ticketNumber}，未建立重複工單`,
+        };
+      }
+
+      // ===== 情境二：未匹配到工單，但該信件屬於「回覆信件 (isReply)」 =====
+      // 特徵：主旨含 Re:/Fwd:、帶有 inReplyTo、或內文有狀態指令
+      // 核心防護：回覆信件絕對不能因為原始主旨殘留的「@某人」就誤建新工單！
+      if (parsed.isReply || parsed.statusCommand) {
+        const orphanLog: MailLog = {
+          id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          timestamp: new Date().toISOString(),
+          sender: from,
+          subject: subject,
+          action: 'UPDATED',
+          details: `收到回覆信件但找不到對應工單 (狀態指令: ${parsed.statusCommand || '無'})，已安全忽略主旨中的歷史點名，避免重複建單`,
+          rawSnippet: parsed.cleanContent.substring(0, 150),
+        };
+        state.mailLogs.unshift(orphanLog);
+
+        return {
+          status: 'IGNORED_REPLY',
+          message: '此信件為既有郵件之回覆，但未找到匹配的工單，已安全忽略以避免重複建單',
         };
       }
 

@@ -1,5 +1,7 @@
 import {
   cleanEmailSubject,
+  normalizeSubjectForMatching,
+  isReplyEmail,
   extractLatestReplyContent,
   extractStatusCommand,
   parseMentionsAndPriority,
@@ -145,6 +147,28 @@ console.log('\n=== 8. 測試銷假動態平衡邏輯 ===');
 const lowestActive = Math.min(...mockRoster.filter(m => m.status === 'ACTIVE').map(m => m.effectiveLoad));
 const resumedLoad = Math.max(0, lowestActive - 1);
 assert(resumedLoad === 1, 'Resumed load equals (lowestActive - 1)');
+
+console.log('\n=== 9. 測試標準化主旨精準比對 (normalizeSubjectForMatching) ===');
+const s1 = 'Re: [外部] [TICK-20261017-001] [P2] 請 @建宏 處理登入問題';
+const s2 = '請 @建宏 處理登入問題';
+assert(normalizeSubjectForMatching(s1) === normalizeSubjectForMatching(s2), 'Re: + [外部] + [TICK-...] + [P2] normalizes identical to original subject');
+
+console.log('\n=== 10. 測試自然語言與括弧狀態指令抽取 (extractStatusCommand) ===');
+assert(extractStatusCommand('這問題已結案，感謝！') === 'CLOSED', '自然語言 "已結案" -> CLOSED');
+assert(extractStatusCommand('[已結案]') === 'CLOSED', '中括號 "[已結案]" -> CLOSED');
+assert(extractStatusCommand('【已處理】已更換伺服器') === 'RESOLVED', '全形中括號 "【已處理】" -> RESOLVED');
+assert(extractStatusCommand('處理中，正在看') === 'IN_PROGRESS', '自然語言 "處理中" -> IN_PROGRESS');
+
+console.log('\n=== 11. 核心情境測試：回覆信件主旨含 @人 且內文含 #已結案 ===');
+const replyEmail = parseIncomingEmail({
+  from: 'jh@company.com',
+  subject: 'Re: [外部] 請 @建宏 處理登入問題',
+  body: '#已結案\n已經重啟服務修復。',
+}, mockRoster);
+assert(replyEmail.isReply === true, 'Correctly identified as isReply=true');
+assert(replyEmail.statusCommand === 'CLOSED', 'Extracted statusCommand=CLOSED');
+assert(replyEmail.bodyMentions.length === 0, 'No body mentions (human did not type new @ in reply)');
+assert(replyEmail.subjectMentions.length === 1 && replyEmail.subjectMentions[0].member.name === '建宏', 'Detected @建宏 in subject mentions');
 
 console.log(`\n========================================`);
 console.log(`測試結果總結: 通過 ${passCount} 項, 失敗 ${failCount} 項`);
