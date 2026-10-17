@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Users, UserPlus, Power, CheckCircle, Shield, Award, Sparkles, RefreshCw } from 'lucide-react';
+import { Users, UserPlus, Power, CheckCircle, Shield, Award, Sparkles, RefreshCw, Edit3 } from 'lucide-react';
 import { TeamMember } from '@/types/store';
 
 interface RosterQueueProps {
@@ -9,6 +9,7 @@ interface RosterQueueProps {
   crownHolderId: string | null;
   onUpdateMember: (id: string, updates: Partial<TeamMember>) => Promise<void>;
   onAddMember: (member: { name: string; email: string; aliases: string[] }) => Promise<void>;
+  onEditMember: (member: TeamMember) => void;
 }
 
 export const RosterQueue: React.FC<RosterQueueProps> = ({
@@ -131,20 +132,31 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
                   )}
                 </div>
 
-                {/* 在線 / 休假切換開關 */}
-                <button
-                  onClick={() => handleToggleStatus(member)}
-                  disabled={loadingId === member.id}
-                  title={isActive ? '點擊切換為休假 (ON_LEAVE)' : '點擊銷假恢復上班 (ACTIVE，自動第一順位補單)'}
-                  className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition ${
-                    isActive
-                      ? 'bg-emerald-50 text-emerald-700 hover:bg-rose-50 hover:text-rose-700 border border-emerald-200 hover:border-rose-200'
-                      : 'bg-indigo-50 text-indigo-700 hover:bg-emerald-50 hover:text-emerald-700 border border-indigo-200'
-                  }`}
-                >
-                  <Power className="w-3 h-3" />
-                  {loadingId === member.id ? '調整中...' : isActive ? '執勤中' : '銷假上班'}
-                </button>
+                <div className="flex items-center gap-1.5">
+                  {/* 編輯維護按鈕 */}
+                  <button
+                    onClick={() => onEditMember(member)}
+                    title="編輯成員姓名、信箱、別名與負載"
+                    className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-100 rounded transition"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+
+                  {/* 在線 / 休假切換開關 */}
+                  <button
+                    onClick={() => handleToggleStatus(member)}
+                    disabled={loadingId === member.id}
+                    title={isActive ? '點擊切換為休假 (ON_LEAVE)' : '點擊銷假恢復上班 (ACTIVE，自動第一順位補單)'}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition ${
+                      isActive
+                        ? 'bg-emerald-50 text-emerald-700 hover:bg-rose-50 hover:text-rose-700 border border-emerald-200 hover:border-rose-200'
+                        : 'bg-indigo-50 text-indigo-700 hover:bg-emerald-50 hover:text-emerald-700 border border-indigo-200'
+                    }`}
+                  >
+                    <Power className="w-3 h-3" />
+                    {loadingId === member.id ? '調整中...' : isActive ? '執勤中' : '銷假上班'}
+                  </button>
+                </div>
               </div>
 
               {/* 成員個人資訊 */}

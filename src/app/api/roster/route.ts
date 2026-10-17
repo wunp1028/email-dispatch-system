@@ -102,8 +102,34 @@ export async function PATCH(req: NextRequest) {
       return member;
     });
 
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = req.nextUrl;
+    const id = searchParams.get('id');
+
+    if (!id) {
+      return NextResponse.json({ error: 'Member id is required' }, { status: 400 });
+    }
+
+    const { result } = await updateSystemState((state) => {
+      const idx = state.roster.findIndex((m) => m.id === id);
+      if (idx === -1) {
+        throw new Error('Member not found');
+      }
+      const [removed] = state.roster.splice(idx, 1);
+
+      // 若刪除的是當前皇冠得主，轉移給第一位在線成員
+      if (state.crownHolderId === id) {
+        const nextActive = state.roster.find((m) => m.status === 'ACTIVE');
+        state.crownHolderId = nextActive ? nextActive.id : null;
+      }
+
+      return { success: true, removedMember: removed };
+    });
+
     return NextResponse.json(result);
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+

@@ -24,6 +24,8 @@ import { EmailSimulatorModal } from '@/components/EmailSimulatorModal';
 import { WhitelistModal } from '@/components/WhitelistModal';
 import { MailLogsModal } from '@/components/MailLogsModal';
 import { ManualTaskModal } from '@/components/ManualTaskModal';
+import { EditMemberModal } from '@/components/EditMemberModal';
+import { DataManagementModal } from '@/components/DataManagementModal';
 
 export default function DashboardPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -38,10 +40,12 @@ export default function DashboardPage() {
 
   // Modals
   const [reassignTask, setReassignTask] = useState<Task | null>(null);
+  const [editingMember, setEditingMember] = useState<TeamMember | null>(null);
   const [showSimulator, setShowSimulator] = useState(false);
   const [showWhitelist, setShowWhitelist] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showManualTask, setShowManualTask] = useState(false);
+  const [showDataManagement, setShowDataManagement] = useState(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -300,21 +304,115 @@ export default function DashboardPage() {
     }
   };
 
-  // 重設為初始種子資料 (方便展示測試)
-  const handleResetToSeed = async () => {
-    if (!confirm('確定要將系統狀態重設為初始示範資料嗎？')) return;
+  // 刪除成員
+  const handleDeleteMember = async (id: string) => {
     try {
-      const res = await fetch('/api/logs', {
+      const res = await fetch(`/api/roster?id=${id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        showToast('成員已成功自輪值名冊中刪除');
+        fetchAllData();
+      } else {
+        const d = await res.json();
+        showToast(d.error || '刪除失敗');
+      }
+    } catch (err: any) {
+      showToast('刪除失敗: ' + err.message);
+    }
+  };
+
+  // 重設為官方預設範例資料 (保留範例資料功能)
+  const handleResetToSeed = async () => {
+    try {
+      const res = await fetch('/api/system/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'RESET_TO_SEED' }),
       });
       if (res.ok) {
-        showToast('系統已重設為乾淨初始種子狀態');
+        showToast('系統已重設為官方預設範例資料！');
         fetchAllData();
       }
     } catch (err: any) {
       showToast('重設失敗: ' + err.message);
+    }
+  };
+
+  // 清空所有工單與歷史日誌
+  const handleClearTasksAndLogs = async () => {
+    try {
+      const res = await fetch('/api/system/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'CLEAR_TASKS_LOGS' }),
+      });
+      if (res.ok) {
+        showToast('所有工單與日誌已全數清空！');
+        fetchAllData();
+      }
+    } catch (err: any) {
+      showToast('清空失敗: ' + err.message);
+    }
+  };
+
+  // 徹底清空系統全部資料
+  const handleClearAllData = async () => {
+    try {
+      const res = await fetch('/api/system/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'CLEAR_ALL_DATA' }),
+      });
+      if (res.ok) {
+        showToast('系統資料已全數清空完畢！');
+        fetchAllData();
+      }
+    } catch (err: any) {
+      showToast('清空失敗: ' + err.message);
+    }
+  };
+
+  // 匯出 JSON 備份檔案
+  const handleExportData = async () => {
+    try {
+      const res = await fetch('/api/system/data');
+      if (res.ok) {
+        const data = await res.json();
+        const jsonStr = JSON.stringify(data, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `email_dispatch_backup_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('系統備份 JSON 已成功匯出！');
+      }
+    } catch (err: any) {
+      showToast('匯出失敗: ' + err.message);
+    }
+  };
+
+  // 匯入 JSON 還原備份
+  const handleImportData = async (file: File) => {
+    try {
+      const text = await file.text();
+      const importedState = JSON.parse(text);
+      const res = await fetch('/api/system/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'IMPORT_JSON', importedState }),
+      });
+      if (res.ok) {
+        showToast('備份資料已成功還原！');
+        fetchAllData();
+      } else {
+        const d = await res.json();
+        showToast(d.error || '匯入失敗');
+      }
+    } catch (err: any) {
+      showToast('檔案格式解析錯誤: ' + err.message);
     }
   };
 
@@ -422,20 +520,21 @@ export default function DashboardPage() {
             </button>
 
             <button
+              onClick={() => setShowDataManagement(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold transition border border-indigo-200"
+              title="系統資料管理 (清空資料/載入範例/備份還原)"
+            >
+              <Database className="w-3.5 h-3.5 text-indigo-600" />
+              <span className="hidden md:inline">資料管理</span>
+            </button>
+
+            <button
               onClick={fetchAllData}
               disabled={refreshing}
               className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition"
               title="重新整理資料"
             >
               <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            </button>
-
-            <button
-              onClick={handleResetToSeed}
-              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-              title="重設為預設種子資料"
-            >
-              <RotateCcw className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -454,12 +553,13 @@ export default function DashboardPage() {
         {/* 1. 皇冠舞台與 KPI 指標 */}
         <CrownStage crownHolder={crownHolder} tasks={tasks} roster={roster} />
 
-        {/* 2. 動態輪值梯隊名冊 (含銷假智慧平衡機制) */}
+        {/* 2. 動態輪值梯隊名冊 (含銷假智慧平衡機制與成員編輯維護) */}
         <RosterQueue
           roster={roster}
           crownHolderId={crownHolderId}
           onUpdateMember={handleUpdateMember}
           onAddMember={handleAddMember}
+          onEditMember={(member) => setEditingMember(member)}
         />
 
         {/* 3. 工單追蹤看板 (支援行內切換 P1~P5、狀態切換、SLA 倒數警示、轉派) */}
@@ -473,6 +573,28 @@ export default function DashboardPage() {
           onDeleteTask={handleDeleteTask}
         />
       </main>
+
+      {/* 編輯成員 Modal */}
+      {editingMember && (
+        <EditMemberModal
+          member={editingMember}
+          onClose={() => setEditingMember(null)}
+          onUpdateMember={handleUpdateMember}
+          onDeleteMember={handleDeleteMember}
+        />
+      )}
+
+      {/* 系統資料管理 Modal (清空工單/範例資料/備份還原) */}
+      {showDataManagement && (
+        <DataManagementModal
+          onClose={() => setShowDataManagement(false)}
+          onResetToSeed={handleResetToSeed}
+          onClearTasksAndLogs={handleClearTasksAndLogs}
+          onClearAllData={handleClearAllData}
+          onExportData={handleExportData}
+          onImportData={handleImportData}
+        />
+      )}
 
       {/* 轉派 Modal */}
       {reassignTask && (
