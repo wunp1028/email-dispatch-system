@@ -181,6 +181,8 @@ export function getDefaultSystemState(): SystemState {
     version: '2.0',
     lastUpdated: new Date().toISOString(),
     crownHolderId: 'mem-2', // 預設 Alex
+    dispatchStrategy: 'DOUBLE_INTERLEAVED',
+    adminPin: 'admin888',
     roster: INITIAL_ROSTER,
     tasks: INITIAL_TASKS,
     whitelist: INITIAL_WHITELIST,

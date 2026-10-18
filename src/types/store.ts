@@ -4,16 +4,19 @@ export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED';
 
 export type MemberStatus = 'ACTIVE' | 'ON_LEAVE';
 
+export type DispatchStrategy = 'DOUBLE_INTERLEAVED' | 'SMOOTH_RESET' | 'ACTIVE_LEAST';
+
 export interface TeamMember {
   id: string;
   name: string;
   email: string;
   aliases: string[]; // 例如 ["建宏", "JH", "Alex"]
   status: MemberStatus;
-  effectiveLoad: number; // 輪值有效負載權重（銷假自動平滑對齊在線最低-1）
+  effectiveLoad: number; // 輪值有效負載權重
   assignedCount: number; // 累計總派發工單數
   completedCount: number; // 累計已結案/已處理數
   currentActiveTasks: number; // 當前處理中/待處理中的工單數
+  catchUpQuota?: number; // 待償還補償單數 (用於雙倍穿插補償模式)
   avatar?: string;
   updatedAt: string;
 }
@@ -90,6 +93,8 @@ export interface SystemState {
   version: string;
   lastUpdated: string;
   crownHolderId: string | null; // 目前皇冠 👑 持有者（最新受派人）
+  dispatchStrategy?: DispatchStrategy; // 當前輪值策略，預設 DOUBLE_INTERLEAVED
+  adminPin?: string; // 管理員授權 PIN，預設 admin888
   roster: TeamMember[];
   tasks: Task[];
   whitelist: WhitelistRule[];

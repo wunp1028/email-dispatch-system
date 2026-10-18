@@ -14,8 +14,10 @@ import {
   AlertCircle,
   ExternalLink,
   RotateCcw,
+  Lock,
+  Unlock,
 } from 'lucide-react';
-import { SystemState, TeamMember, Task, WhitelistRule, MailLog, TaskStatus, Priority } from '@/types/store';
+import { SystemState, TeamMember, Task, WhitelistRule, MailLog, TaskStatus, Priority, DispatchStrategy } from '@/types/store';
 import { CrownStage } from '@/components/CrownStage';
 import { RosterQueue } from '@/components/RosterQueue';
 import { TaskBoard } from '@/components/TaskBoard';
@@ -26,6 +28,7 @@ import { MailLogsModal } from '@/components/MailLogsModal';
 import { ManualTaskModal } from '@/components/ManualTaskModal';
 import { EditMemberModal } from '@/components/EditMemberModal';
 import { DataManagementModal } from '@/components/DataManagementModal';
+import { AdminAuthModal } from '@/components/AdminAuthModal';
 
 export default function DashboardPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -33,10 +36,16 @@ export default function DashboardPage() {
   const [whitelist, setWhitelist] = useState<WhitelistRule[]>([]);
   const [mailLogs, setMailLogs] = useState<MailLog[]>([]);
   const [crownHolderId, setCrownHolderId] = useState<string | null>(null);
+  const [dispatchStrategy, setDispatchStrategy] = useState<DispatchStrategy>('DOUBLE_INTERLEAVED');
   const [storageStatus, setStorageStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Admin PIN Auth 授權狀態
+  const [showAdminAuth, setShowAdminAuth] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pendingAdminAction, setPendingAdminAction] = useState<(() => void) | null>(null);
 
   // Modals
   const [reassignTask, setReassignTask] = useState<Task | null>(null);
@@ -52,6 +61,64 @@ export default function DashboardPage() {
     setTimeout(() => {
       setToastMessage(null);
     }, 3500);
+  };
+
+  // 檢查本機記住的 Admin PIN (效期 7 天)
+  const getStoredAdminPin = useCallback((): string | null => {
+    if (typeof window === 'undefined') return null;
+    const pin = localStorage.getItem('email_dispatch_admin_pin');
+    const authTime = localStorage.getItem('email_dispatch_admin_auth_time');
+    if (!pin || !authTime) return null;
+    const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+    if (Date.now() - Number(authTime) > SEVEN_DAYS) {
+      localStorage.removeItem('email_dispatch_admin_pin');
+      localStorage.removeItem('email_dispatch_admin_auth_time');
+      setIsAdmin(false);
+      return null;
+    }
+    return pin;
+  }, []);
+
+  const getAdminHeaders = useCallback((): Record<string, string> => {
+    const pin = getStoredAdminPin();
+    return pin ? { 'x-admin-pin': pin } : {};
+  }, [getStoredAdminPin]);
+
+  useEffect(() => {
+    const pin = getStoredAdminPin();
+    if (pin) {
+      setIsAdmin(true);
+    }
+  }, [getStoredAdminPin]);
+
+  const requireAdminAuth = useCallback(
+    (action: () => void) => {
+      const pin = getStoredAdminPin();
+      if (pin) {
+        action();
+      } else {
+        setPendingAdminAction(() => action);
+        setShowAdminAuth(true);
+      }
+    },
+    [getStoredAdminPin]
+  );
+
+  const handleAdminAuthSuccess = (pin: string) => {
+    setIsAdmin(true);
+    showToast('管理員已成功授權解鎖 (記住 7 天)');
+    if (pendingAdminAction) {
+      const action = pendingAdminAction;
+      setPendingAdminAction(null);
+      action();
+    }
+  };
+
+  const handleAdminLogout = () => {
+    localStorage.removeItem('email_dispatch_admin_pin');
+    localStorage.removeItem('email_dispatch_admin_auth_time');
+    setIsAdmin(false);
+    showToast('已登出管理員身份，鎖定為唯讀保護模式');
   };
 
   // 取得最新系統資料
@@ -85,6 +152,9 @@ export default function DashboardPage() {
         if (rosterData.crownHolderId) {
           setCrownHolderId(rosterData.crownHolderId);
         }
+        if (rosterData.dispatchStrategy) {
+          setDispatchStrategy(rosterData.dispatchStrategy);
+        }
       }
 
       if (whitelistRes.ok) {
@@ -108,6 +178,36 @@ export default function DashboardPage() {
   useEffect(() => {
     fetchAllData();
   }, [fetchAllData]);
+
+  // 切換派工策略 (雙倍穿插補償模式 / 平滑保護模式 / 極致清閒平衡模式)
+  const handleUpdateStrategy = async (strategy: DispatchStrategy) => {
+    const pin = getStoredAdminPin();
+    if (!pin) {
+      requireAdminAuth(() => handleUpdateStrategy(strategy));
+      return;
+    }
+    try {
+      const res = await fetch('/api/system/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
+        body: JSON.stringify({ action: 'SET_DISPATCH_STRATEGY', strategy }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDispatchStrategy(strategy);
+        showToast(data.message || '派工策略已更新');
+        fetchAllData();
+      } else {
+        if (res.status === 403) {
+          requireAdminAuth(() => handleUpdateStrategy(strategy));
+        } else {
+          showToast(data.error || '策略切換失敗');
+        }
+      }
+    } catch (err: any) {
+      showToast('策略切換失敗: ' + err.message);
+    }
+  };
 
   // 更新工單狀態 (行內直接切換)
   const handleUpdateStatus = async (taskId: string, status: TaskStatus) => {
@@ -196,61 +296,92 @@ export default function DashboardPage() {
     }
   };
 
-  // 人員維護 (銷假 / 休假切換)
+  // 人員維護 (銷假 / 休假切換 或 資料編輯)
   const handleUpdateMember = async (id: string, updates: Partial<TeamMember>) => {
+    const isSensitive = Boolean(updates.name || updates.email || updates.aliases || typeof updates.effectiveLoad === 'number');
+    if (isSensitive && !getStoredAdminPin()) {
+      requireAdminAuth(() => handleUpdateMember(id, updates));
+      return;
+    }
+
     try {
       const res = await fetch('/api/roster', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ id, ...updates }),
       });
       if (res.ok) {
         if (updates.status === 'ACTIVE') {
-          showToast('人員已銷假上班！系統已自動對齊 (在線最低-1) 優先輪值第一順位補單。');
+          showToast('人員已銷假上班！系統已依策略自動對齊負載並排入穿插補償輪值。');
         } else {
           showToast('人員狀態已更新');
         }
         fetchAllData();
+      } else {
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleUpdateMember(id, updates));
+        } else {
+          showToast(d.error || '更新失敗');
+        }
       }
     } catch (err: any) {
       showToast('更新失敗: ' + err.message);
     }
   };
 
-  // 新增成員
+  // 新增成員 (需管理員權限)
   const handleAddMember = async (memberData: { name: string; email: string; aliases: string[] }) => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(() => handleAddMember(memberData));
+      return;
+    }
+
     try {
       const res = await fetch('/api/roster', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify(memberData),
       });
       if (res.ok) {
         showToast(`已成功加入成員 ${memberData.name}`);
         fetchAllData();
       } else {
-        const data = await res.json();
-        showToast(data.error || '新增失敗');
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleAddMember(memberData));
+        } else {
+          showToast(data.error || '新增失敗');
+        }
       }
     } catch (err: any) {
       showToast('新增失敗: ' + err.message);
     }
   };
 
-  // 白名單操作
+  // 白名單操作 (需管理員權限)
   const handleAddWhitelistRule = async (rule: { pattern: string; description: string }) => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(() => handleAddWhitelistRule(rule));
+      return;
+    }
+
     try {
       const res = await fetch('/api/whitelist', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify(rule),
       });
       if (res.ok) {
         showToast(`白名單樣式 ${rule.pattern} 已加入`);
         fetchAllData();
       } else {
-        const data = await res.json();
-        showToast(data.error || '加入失敗');
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleAddWhitelistRule(rule));
+        } else {
+          showToast(data.error || '加入失敗');
+        }
       }
     } catch (err: any) {
       showToast('加入失敗: ' + err.message);
@@ -258,15 +389,27 @@ export default function DashboardPage() {
   };
 
   const handleToggleWhitelistRule = async (id: string, enabled: boolean) => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(() => handleToggleWhitelistRule(id, enabled));
+      return;
+    }
+
     try {
       const res = await fetch('/api/whitelist', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ id, enabled }),
       });
       if (res.ok) {
         showToast(`白名單規則已${enabled ? '啟用' : '停用'}`);
         fetchAllData();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleToggleWhitelistRule(id, enabled));
+        } else {
+          showToast(data.error || '切換失敗');
+        }
       }
     } catch (err: any) {
       showToast('切換失敗: ' + err.message);
@@ -274,13 +417,26 @@ export default function DashboardPage() {
   };
 
   const handleDeleteWhitelistRule = async (id: string) => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(() => handleDeleteWhitelistRule(id));
+      return;
+    }
+
     try {
       const res = await fetch(`/api/whitelist?id=${id}`, {
         method: 'DELETE',
+        headers: { ...getAdminHeaders() },
       });
       if (res.ok) {
         showToast('白名單規則已刪除');
         fetchAllData();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleDeleteWhitelistRule(id));
+        } else {
+          showToast(data.error || '刪除失敗');
+        }
       }
     } catch (err: any) {
       showToast('刪除失敗: ' + err.message);
@@ -304,18 +460,28 @@ export default function DashboardPage() {
     }
   };
 
-  // 刪除成員
+  // 刪除成員 (需管理員權限)
   const handleDeleteMember = async (id: string) => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(() => handleDeleteMember(id));
+      return;
+    }
+
     try {
       const res = await fetch(`/api/roster?id=${id}`, {
         method: 'DELETE',
+        headers: { ...getAdminHeaders() },
       });
       if (res.ok) {
         showToast('成員已成功自輪值名冊中刪除');
         fetchAllData();
       } else {
-        const d = await res.json();
-        showToast(d.error || '刪除失敗');
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleDeleteMember(id));
+        } else {
+          showToast(d.error || '刪除失敗');
+        }
       }
     } catch (err: any) {
       showToast('刪除失敗: ' + err.message);
@@ -324,15 +490,27 @@ export default function DashboardPage() {
 
   // 重設為官方預設範例資料 (保留範例資料功能)
   const handleResetToSeed = async () => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(handleResetToSeed);
+      return;
+    }
+
     try {
       const res = await fetch('/api/system/data', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ action: 'RESET_TO_SEED' }),
       });
       if (res.ok) {
         showToast('系統已重設為官方預設範例資料！');
         fetchAllData();
+      } else {
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(handleResetToSeed);
+        } else {
+          showToast(d.error || '重設失敗');
+        }
       }
     } catch (err: any) {
       showToast('重設失敗: ' + err.message);
@@ -341,15 +519,27 @@ export default function DashboardPage() {
 
   // 清空所有工單與歷史日誌
   const handleClearTasksAndLogs = async () => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(handleClearTasksAndLogs);
+      return;
+    }
+
     try {
       const res = await fetch('/api/system/data', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ action: 'CLEAR_TASKS_LOGS' }),
       });
       if (res.ok) {
         showToast('所有工單與日誌已全數清空！');
         fetchAllData();
+      } else {
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(handleClearTasksAndLogs);
+        } else {
+          showToast(d.error || '清空失敗');
+        }
       }
     } catch (err: any) {
       showToast('清空失敗: ' + err.message);
@@ -358,15 +548,27 @@ export default function DashboardPage() {
 
   // 徹底清空系統全部資料
   const handleClearAllData = async () => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(handleClearAllData);
+      return;
+    }
+
     try {
       const res = await fetch('/api/system/data', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ action: 'CLEAR_ALL_DATA' }),
       });
       if (res.ok) {
         showToast('系統資料已全數清空完畢！');
         fetchAllData();
+      } else {
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(handleClearAllData);
+        } else {
+          showToast(d.error || '清空失敗');
+        }
       }
     } catch (err: any) {
       showToast('清空失敗: ' + err.message);
@@ -396,20 +598,29 @@ export default function DashboardPage() {
 
   // 匯入 JSON 還原備份
   const handleImportData = async (file: File) => {
+    if (!getStoredAdminPin()) {
+      requireAdminAuth(() => handleImportData(file));
+      return;
+    }
+
     try {
       const text = await file.text();
       const importedState = JSON.parse(text);
       const res = await fetch('/api/system/data', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAdminHeaders() },
         body: JSON.stringify({ action: 'IMPORT_JSON', importedState }),
       });
       if (res.ok) {
         showToast('備份資料已成功還原！');
         fetchAllData();
       } else {
-        const d = await res.json();
-        showToast(d.error || '匯入失敗');
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          requireAdminAuth(() => handleImportData(file));
+        } else {
+          showToast(d.error || '匯入失敗');
+        }
       }
     } catch (err: any) {
       showToast('檔案格式解析錯誤: ' + err.message);
@@ -520,13 +731,36 @@ export default function DashboardPage() {
             </button>
 
             <button
-              onClick={() => setShowDataManagement(true)}
+              onClick={() => {
+                requireAdminAuth(() => setShowDataManagement(true));
+              }}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold transition border border-indigo-200"
-              title="系統資料管理 (清空資料/載入範例/備份還原)"
+              title="系統資料管理 (需管理員權限)"
             >
               <Database className="w-3.5 h-3.5 text-indigo-600" />
               <span className="hidden md:inline">資料管理</span>
             </button>
+
+            {/* 管理員 PIN 碼解鎖切換按鈕 */}
+            {isAdmin ? (
+              <button
+                onClick={handleAdminLogout}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg text-xs font-semibold transition border border-emerald-200"
+                title="管理員已授權 (點擊登出鎖定)"
+              >
+                <Unlock className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="hidden sm:inline">管理員已授權</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowAdminAuth(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition border border-slate-200"
+                title="點擊輸入管理員密鑰 (預設 admin888) 解鎖"
+              >
+                <Lock className="w-3.5 h-3.5 text-slate-500" />
+                <span className="hidden sm:inline">管理員解鎖</span>
+              </button>
+            )}
 
             <button
               onClick={fetchAllData}
@@ -553,13 +787,18 @@ export default function DashboardPage() {
         {/* 1. 皇冠舞台與 KPI 指標 */}
         <CrownStage crownHolder={crownHolder} tasks={tasks} roster={roster} />
 
-        {/* 2. 動態輪值梯隊名冊 (含銷假智慧平衡機制與成員編輯維護) */}
+        {/* 2. 動態輪值梯隊名冊 (含派工策略選擇、銷假雙倍穿插補償與成員編輯) */}
         <RosterQueue
           roster={roster}
           crownHolderId={crownHolderId}
+          dispatchStrategy={dispatchStrategy}
+          onUpdateStrategy={handleUpdateStrategy}
           onUpdateMember={handleUpdateMember}
           onAddMember={handleAddMember}
-          onEditMember={(member) => setEditingMember(member)}
+          onEditMember={(member) => {
+            requireAdminAuth(() => setEditingMember(member));
+          }}
+          onRequestAdminAuth={requireAdminAuth}
         />
 
         {/* 3. 工單追蹤看板 (支援行內切換 P1~P5、狀態切換、SLA 倒數警示、轉派) */}
@@ -647,6 +886,16 @@ export default function DashboardPage() {
           onCreateTask={handleCreateManualTask}
         />
       )}
+
+      {/* 管理員 PIN 碼驗證授權 Modal */}
+      <AdminAuthModal
+        isOpen={showAdminAuth}
+        onClose={() => {
+          setShowAdminAuth(false);
+          setPendingAdminAction(null);
+        }}
+        onSuccess={handleAdminAuthSuccess}
+      />
     </div>
   );
 }

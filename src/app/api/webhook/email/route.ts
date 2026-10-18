@@ -292,22 +292,36 @@ export async function POST(req: NextRequest) {
           newTicketNumbers.push(ticketNumber);
         }
       } else {
-        // === 模式二：系統平衡輪值 (未指定人員，派給在線有效負載最低者) ===
+        // === 模式二：系統智慧動態輪值 ===
+        const strategy = state.dispatchStrategy || 'DOUBLE_INTERLEAVED';
         const activeMembers = state.roster.filter((m) => m.status === 'ACTIVE');
         if (activeMembers.length === 0) {
           // 若無人在線，取全員
           activeMembers.push(...state.roster);
         }
 
-        // 尋找 effectiveLoad 最小者；若相同，避開前次持冠者
-        activeMembers.sort((a, b) => {
-          if (a.effectiveLoad !== b.effectiveLoad) {
+        if (strategy === 'ACTIVE_LEAST') {
+          // 【極致清閒平衡模式】：手頭未結案工單最少者優先，若相同避讓持冠者
+          activeMembers.sort((a, b) => {
+            if (a.currentActiveTasks !== b.currentActiveTasks) {
+              return a.currentActiveTasks - b.currentActiveTasks;
+            }
+            if (a.id === state.crownHolderId) return 1;
+            if (b.id === state.crownHolderId) return -1;
             return a.effectiveLoad - b.effectiveLoad;
-          }
-          if (a.id === state.crownHolderId) return 1;
-          if (b.id === state.crownHolderId) return -1;
-          return a.currentActiveTasks - b.currentActiveTasks;
-        });
+          });
+        } else {
+          // 【雙倍穿插補償模式】(預設) 或 【平滑保護模式】
+          // 尋找 effectiveLoad 最小者；若相同，避開前次持冠者
+          activeMembers.sort((a, b) => {
+            if (a.effectiveLoad !== b.effectiveLoad) {
+              return a.effectiveLoad - b.effectiveLoad;
+            }
+            if (a.id === state.crownHolderId) return 1;
+            if (b.id === state.crownHolderId) return -1;
+            return a.currentActiveTasks - b.currentActiveTasks;
+          });
+        }
 
         const chosenMember = activeMembers[0];
         const priority = parsed.defaultPriority || 'P3';
@@ -315,8 +329,15 @@ export async function POST(req: NextRequest) {
         const seq = state.tasks.length + 1;
         const ticketNumber = generateTicketNumber(seq);
 
-        // 累計與皇冠移交
-        chosenMember.effectiveLoad += 1;
+        // 累計與皇冠移交 (依據策略決定步長)
+        if (strategy === 'DOUBLE_INTERLEAVED' && (chosenMember.catchUpQuota || 0) > 0) {
+          // 補償期：接單步長 +0.5，待償額度 -1
+          chosenMember.effectiveLoad += 0.5;
+          chosenMember.catchUpQuota = Math.max(0, (chosenMember.catchUpQuota || 0) - 1);
+        } else {
+          chosenMember.effectiveLoad += 1;
+        }
+
         chosenMember.assignedCount += 1;
         chosenMember.currentActiveTasks += 1;
         chosenMember.updatedAt = new Date().toISOString();

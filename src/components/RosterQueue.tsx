@@ -1,23 +1,29 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Users, UserPlus, Power, CheckCircle, Shield, Award, Sparkles, RefreshCw, Edit3 } from 'lucide-react';
-import { TeamMember } from '@/types/store';
+import { Users, UserPlus, Power, CheckCircle, Shield, Award, Sparkles, RefreshCw, Edit3, Zap, Sliders } from 'lucide-react';
+import { TeamMember, DispatchStrategy } from '@/types/store';
 
 interface RosterQueueProps {
   roster: TeamMember[];
   crownHolderId: string | null;
+  dispatchStrategy?: DispatchStrategy;
+  onUpdateStrategy?: (strategy: DispatchStrategy) => Promise<void>;
   onUpdateMember: (id: string, updates: Partial<TeamMember>) => Promise<void>;
   onAddMember: (member: { name: string; email: string; aliases: string[] }) => Promise<void>;
   onEditMember: (member: TeamMember) => void;
+  onRequestAdminAuth?: (action: () => void) => void;
 }
 
 export const RosterQueue: React.FC<RosterQueueProps> = ({
   roster,
   crownHolderId,
+  dispatchStrategy = 'DOUBLE_INTERLEAVED',
+  onUpdateStrategy,
   onUpdateMember,
   onAddMember,
   onEditMember,
+  onRequestAdminAuth,
 }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newName, setNewName] = useState('');
@@ -52,7 +58,7 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
       setIsSubmitting(true);
       const aliasesList = newAliases
         .split(/[,，\s]+/)
-        .map((s) => s.trim())
+        .map((a) => a.trim())
         .filter(Boolean);
 
       await onAddMember({
@@ -70,9 +76,34 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
     }
   };
 
+  const handleOpenAddModal = () => {
+    if (onRequestAdminAuth) {
+      onRequestAdminAuth(() => setShowAddModal(true));
+    } else {
+      setShowAddModal(true);
+    }
+  };
+
+  const handleOpenEditMember = (member: TeamMember) => {
+    if (onRequestAdminAuth) {
+      onRequestAdminAuth(() => onEditMember(member));
+    } else {
+      onEditMember(member);
+    }
+  };
+
+  const handleStrategyChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const targetStrategy = e.target.value as DispatchStrategy;
+    if (onRequestAdminAuth) {
+      onRequestAdminAuth(() => onUpdateStrategy?.(targetStrategy));
+    } else {
+      onUpdateStrategy?.(targetStrategy);
+    }
+  };
+
   return (
     <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+      <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 pb-4 border-b border-slate-100">
         <div>
           <div className="flex items-center gap-2">
             <Users className="w-5 h-5 text-indigo-600" />
@@ -82,17 +113,40 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            由系統智慧排序：在線且有效負載 (effectiveLoad) 最低者排在最前；銷假上班時自動對齊為 <code className="bg-slate-100 px-1 py-0.5 rounded text-amber-700 font-semibold">最低值 - 1</code> 優先補單。
+            {dispatchStrategy === 'DOUBLE_INTERLEAVED' ? (
+              <span>當前策略：<strong className="text-indigo-600 font-semibold">【雙倍穿插補償模式】</strong>（銷假同仁享有 2:1 穿插接單權重加速補單，嚴守皇冠避讓絕不連莊）</span>
+            ) : dispatchStrategy === 'ACTIVE_LEAST' ? (
+              <span>當前策略：<strong className="text-emerald-600 font-semibold">【極致清閒平衡模式】</strong>（永遠優先指派給當下手頭未結案工單最少的人）</span>
+            ) : (
+              <span>當前策略：<strong className="text-amber-700 font-semibold">【平滑保護模式】</strong>（銷假上班時自動對齊為最低值 - 1 破冰接 1 張，保護不塞單）</span>
+            )}
           </p>
         </div>
 
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-medium transition shadow-sm"
-        >
-          <UserPlus className="w-3.5 h-3.5" />
-          新增輪值成員
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto">
+          {/* 策略下拉選單 */}
+          <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 shadow-2xs">
+            <Sliders className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+            <span className="text-xs text-slate-600 font-medium shrink-0">輪值策略:</span>
+            <select
+              value={dispatchStrategy}
+              onChange={handleStrategyChange}
+              className="bg-transparent text-xs font-bold text-slate-800 focus:outline-none cursor-pointer pr-1"
+            >
+              <option value="DOUBLE_INTERLEAVED">⚡ 雙倍穿插補償模式 (預設)</option>
+              <option value="SMOOTH_RESET">🛡️ 平滑保護模式 (破冰接1張)</option>
+              <option value="ACTIVE_LEAST">⚖️ 極致清閒平衡模式 (純看在手)</option>
+            </select>
+          </div>
+
+          <button
+            onClick={handleOpenAddModal}
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold transition shadow-sm active:scale-95"
+          >
+            <UserPlus className="w-3.5 h-3.5" />
+            新增輪值成員
+          </button>
+        </div>
       </div>
 
       {/* 成員列表橫向 / 網格滾動卡片 */}
@@ -101,6 +155,7 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
           const isCrown = member.id === crownHolderId;
           const isActive = member.status === 'ACTIVE';
           const isNextInLine = isActive && index === 0;
+          const hasCatchUp = Boolean(member.catchUpQuota && member.catchUpQuota > 0);
 
           return (
             <div
@@ -113,9 +168,9 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
                   : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-sm'
               }`}
             >
-              {/* 皇冠 / 輪值第一順位標記 */}
+              {/* 皇冠 / 輪值第一順位 / 補償標記 */}
               <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   {isCrown && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-400 text-slate-950 shadow-xs">
                       👑 最新持冠
@@ -126,6 +181,11 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
                       🎯 下一順位
                     </span>
                   )}
+                  {hasCatchUp && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-purple-100 text-purple-800 border border-purple-300 animate-pulse">
+                      ⚡ 補償中 (剩 {member.catchUpQuota} 單)
+                    </span>
+                  )}
                   {!isActive && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-200 text-slate-700">
                       🏖️ 休假中
@@ -134,10 +194,10 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1.5">
-                  {/* 編輯維護按鈕 */}
+                  {/* 編輯維護按鈕 (管理員保護) */}
                   <button
-                    onClick={() => onEditMember(member)}
-                    title="編輯成員姓名、信箱、別名與負載"
+                    onClick={() => handleOpenEditMember(member)}
+                    title="編輯成員姓名、信箱、別名與負載 (需管理員權限)"
                     className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-100 rounded transition"
                   >
                     <Edit3 className="w-3.5 h-3.5" />
@@ -147,7 +207,7 @@ export const RosterQueue: React.FC<RosterQueueProps> = ({
                   <button
                     onClick={() => handleToggleStatus(member)}
                     disabled={loadingId === member.id}
-                    title={isActive ? '點擊切換為休假 (ON_LEAVE)' : '點擊銷假恢復上班 (ACTIVE，自動第一順位補單)'}
+                    title={isActive ? '點擊切換為休假 (ON_LEAVE)' : '點擊銷假恢復上班 (ACTIVE)'}
                     className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition ${
                       isActive
                         ? 'bg-emerald-50 text-emerald-700 hover:bg-rose-50 hover:text-rose-700 border border-emerald-200 hover:border-rose-200'

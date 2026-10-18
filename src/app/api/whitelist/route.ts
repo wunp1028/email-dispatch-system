@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSystemState, updateSystemState } from '@/lib/storage';
 import { WhitelistRule } from '@/types/store';
+import { verifyAdminRequest, DEFAULT_ADMIN_PIN } from '@/lib/auth';
 
 export async function GET() {
   try {
@@ -16,6 +17,16 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    const state = await getSystemState();
+    const configuredPin = state.adminPin || process.env.ADMIN_PIN || DEFAULT_ADMIN_PIN;
+
+    if (!verifyAdminRequest(req, configuredPin)) {
+      return NextResponse.json(
+        { error: '操作未授權：需要有效的管理員密鑰 (Admin PIN) 才能新增白名單' },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json();
     const { pattern, description = '', addedBy = 'Admin' } = body;
 
@@ -25,9 +36,9 @@ export async function POST(req: NextRequest) {
 
     const cleanPattern = pattern.trim();
 
-    const { result } = await updateSystemState((state) => {
+    const { result } = await updateSystemState((s) => {
       // 避免重複規則
-      if (state.whitelist.some((w) => w.pattern.toLowerCase() === cleanPattern.toLowerCase())) {
+      if (s.whitelist.some((w) => w.pattern.toLowerCase() === cleanPattern.toLowerCase())) {
         throw new Error('Rule with this pattern already exists');
       }
 
@@ -40,7 +51,7 @@ export async function POST(req: NextRequest) {
         enabled: true,
       };
 
-      state.whitelist.unshift(newRule);
+      s.whitelist.unshift(newRule);
       return newRule;
     });
 
@@ -52,6 +63,16 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
+    const state = await getSystemState();
+    const configuredPin = state.adminPin || process.env.ADMIN_PIN || DEFAULT_ADMIN_PIN;
+
+    if (!verifyAdminRequest(req, configuredPin)) {
+      return NextResponse.json(
+        { error: '操作未授權：需要有效的管理員密鑰 (Admin PIN) 才能修改白名單' },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json();
     const { id, enabled, description, pattern } = body;
 
@@ -59,8 +80,8 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: 'Rule id is required' }, { status: 400 });
     }
 
-    const { result } = await updateSystemState((state) => {
-      const rule = state.whitelist.find((w) => w.id === id);
+    const { result } = await updateSystemState((s) => {
+      const rule = s.whitelist.find((w) => w.id === id);
       if (!rule) {
         throw new Error('Rule not found');
       }
@@ -80,6 +101,16 @@ export async function PATCH(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
+    const state = await getSystemState();
+    const configuredPin = state.adminPin || process.env.ADMIN_PIN || DEFAULT_ADMIN_PIN;
+
+    if (!verifyAdminRequest(req, configuredPin)) {
+      return NextResponse.json(
+        { error: '操作未授權：需要有效的管理員密鑰 (Admin PIN) 才能刪除白名單' },
+        { status: 403 }
+      );
+    }
+
     const { searchParams } = req.nextUrl;
     const id = searchParams.get('id');
 
@@ -87,12 +118,12 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'Rule id is required in query parameters' }, { status: 400 });
     }
 
-    const { result } = await updateSystemState((state) => {
-      const idx = state.whitelist.findIndex((w) => w.id === id);
+    const { result } = await updateSystemState((s) => {
+      const idx = s.whitelist.findIndex((w) => w.id === id);
       if (idx === -1) {
         throw new Error('Rule not found');
       }
-      const [removed] = state.whitelist.splice(idx, 1);
+      const [removed] = s.whitelist.splice(idx, 1);
       return { success: true, removedRule: removed };
     });
 
