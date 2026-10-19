@@ -64,26 +64,44 @@ export async function POST(req: NextRequest) {
         state.roster
       );
 
-      // 3. 檢查是否為針對既有工單的回覆更新或討論
+      // 3. 檢查歷史的主旨或識別碼，精準判斷是否已建立過工單
       let targetTask: Task | undefined;
 
-      // 3.1 優先以明確票號 (TICK-20261017-001) 尋找
-      if (parsed.referencedTicketNumber) {
-        targetTask = state.tasks.find((t) => t.ticketNumber === parsed.referencedTicketNumber);
-      }
-
-      // 3.2 依據郵件標頭 inReplyTo 比對既有工單的 messageId
-      if (!targetTask && inReplyTo) {
+      // 3.1 優先比對明確工單識別碼 (票號，例如 TICK-20261017-001)
+      const refTicket = parsed.referencedTicketNumber;
+      if (refTicket) {
         targetTask = state.tasks.find(
-          (t) => t.messageId && (t.messageId === inReplyTo || inReplyTo.includes(t.messageId))
+          (t) =>
+            t.ticketNumber.toLowerCase() === refTicket.toLowerCase() ||
+            t.id.toLowerCase() === refTicket.toLowerCase()
         );
       }
 
-      // 3.3 依據標準化主旨比對 (先找未結案工單，若未找到再找已結案)
-      if (!targetTask && parsed.cleanSubject) {
-        const normCurrent = normalizeSubjectForMatching(parsed.cleanSubject);
+      // 3.2 依據郵件 Message-ID / In-Reply-To / References 識別碼比對既有工單
+      if (!targetTask && (inReplyTo || payload.references)) {
+        const refsStr = payload.references
+          ? Array.isArray(payload.references)
+            ? payload.references.join(' ')
+            : String(payload.references)
+          : '';
+        const checkIds = [inReplyTo, ...refsStr.split(/\s+/)]
+          .filter(Boolean)
+          .map((id: string) => id.replace(/[<>]/g, '').trim().toLowerCase());
+
+        targetTask = state.tasks.find((t) => {
+          if (!t.messageId) return false;
+          const cleanTaskMsgId = t.messageId.replace(/[<>]/g, '').trim().toLowerCase();
+          return checkIds.some(
+            (cid: string) => cid && (cid === cleanTaskMsgId || cleanTaskMsgId.includes(cid) || cid.includes(cleanTaskMsgId))
+          );
+        });
+      }
+
+      // 3.3 依據歷史主旨比對 (比對所有歷史工單的標準化主旨與原始主旨)
+      if (!targetTask && (parsed.cleanSubject || subject)) {
+        const normCurrent = normalizeSubjectForMatching(parsed.cleanSubject || subject);
         if (normCurrent) {
-          // 先在未結案中尋找精確相符者
+          // A. 優先於未結案中尋找精確相符之主旨 (最近更新者優先)
           targetTask = state.tasks.find(
             (t) =>
               t.status !== 'CLOSED' &&
@@ -91,8 +109,8 @@ export async function POST(req: NextRequest) {
                normalizeSubjectForMatching(t.mailSubject) === normCurrent)
           );
 
-          // 若有狀態指令，擴大比對全部工單 (例如重啟已結案，或重複確認結案)
-          if (!targetTask && parsed.statusCommand) {
+          // B. 若未找到，於全部歷史工單（含已結案）中尋找精確相符之主旨
+          if (!targetTask) {
             targetTask = state.tasks.find(
               (t) =>
                 normalizeSubjectForMatching(t.cleanSubject) === normCurrent ||
@@ -100,20 +118,31 @@ export async function POST(req: NextRequest) {
             );
           }
 
-          // 核心關鍵詞子字串模糊比對（長度大於 6 字元）
-          if (!targetTask && normCurrent.length >= 6) {
-            targetTask = state.tasks.find((t) => {
-              const normTask = normalizeSubjectForMatching(t.cleanSubject);
-              return (
-                normTask.length >= 6 &&
-                (normCurrent.includes(normTask) || normTask.includes(normCurrent))
-              );
-            });
+          // C. 核心主旨子字串模糊比對（長度 >= 4 字元，優先比對未結案，再比對全部）
+          if (!targetTask && normCurrent.length >= 4) {
+            targetTask =
+              state.tasks.find((t) => {
+                if (t.status === 'CLOSED') return false;
+                const normTaskClean = normalizeSubjectForMatching(t.cleanSubject);
+                const normTaskMail = normalizeSubjectForMatching(t.mailSubject);
+                return (
+                  (normTaskClean.length >= 4 && (normCurrent.includes(normTaskClean) || normTaskClean.includes(normCurrent))) ||
+                  (normTaskMail.length >= 4 && (normCurrent.includes(normTaskMail) || normTaskMail.includes(normCurrent)))
+                );
+              }) ||
+              state.tasks.find((t) => {
+                const normTaskClean = normalizeSubjectForMatching(t.cleanSubject);
+                const normTaskMail = normalizeSubjectForMatching(t.mailSubject);
+                return (
+                  (normTaskClean.length >= 4 && (normCurrent.includes(normTaskClean) || normTaskClean.includes(normCurrent))) ||
+                  (normTaskMail.length >= 4 && (normCurrent.includes(normTaskMail) || normTaskMail.includes(normCurrent)))
+                );
+              });
           }
         }
       }
 
-      // ===== 情境一：成功匹配到既有工單 =====
+      // ===== 情境一：歷史主旨或識別碼成功匹配到既有工單 =====
       if (targetTask) {
         const oldStatus = targetTask.status;
 
@@ -161,7 +190,7 @@ export async function POST(req: NextRequest) {
             sender: from,
             subject: subject,
             action: 'UPDATED',
-            details: `回信成功更新工單 ${targetTask.ticketNumber} 狀態為 ${newStatus}`,
+            details: `回信成功更新既有工單 ${targetTask.ticketNumber} 狀態為 ${newStatus}`,
             ticketNumbers: [targetTask.ticketNumber],
             rawSnippet: parsed.cleanContent.substring(0, 150),
           };
@@ -171,7 +200,7 @@ export async function POST(req: NextRequest) {
             status: 'UPDATED',
             ticketNumber: targetTask.ticketNumber,
             newStatus,
-            message: `工單 ${targetTask.ticketNumber} 狀態已更新為 ${newStatus}`,
+            message: `既有工單 ${targetTask.ticketNumber} 狀態已更新為 ${newStatus}`,
           };
         }
 
@@ -179,6 +208,17 @@ export async function POST(req: NextRequest) {
         // 核心原則：絕不重複建立工單！追加紀錄至該工單歷程
         if (targetTask.status === 'PENDING') {
           targetTask.status = 'IN_PROGRESS'; // 有人回信，自動晉升為進行中
+        } else if (targetTask.status === 'CLOSED' || targetTask.status === 'RESOLVED') {
+          // 針對已結案工單的新回信，自動重啟工單為進行中
+          targetTask.status = 'IN_PROGRESS';
+          const member = state.roster.find((m) => m.id === targetTask!.assigneeId);
+          if (member) {
+            member.currentActiveTasks += 1;
+            if (oldStatus === 'CLOSED') {
+              member.completedCount = Math.max(0, member.completedCount - 1);
+            }
+            member.updatedAt = new Date().toISOString();
+          }
         }
         targetTask.updatedAt = new Date().toISOString();
 
@@ -210,26 +250,33 @@ export async function POST(req: NextRequest) {
         };
       }
 
-      // ===== 情境二：未匹配到工單，但該信件屬於「回覆信件 (isReply)」 =====
-      // 特徵：主旨含 Re:/Fwd:、帶有 inReplyTo、或內文有狀態指令
-      // 核心防護：回覆信件絕對不能因為原始主旨殘留的「@某人」就誤建新工單！
-      if (parsed.isReply || parsed.statusCommand) {
-        const orphanLog: MailLog = {
+      // ===== 情境二：歷史主旨與識別碼皆未匹配到工單 =====
+      // 唯有當寄件者明確指定了不存在的票號並試圖變更狀態時，才做錯誤回報
+      if (refTicket && parsed.statusCommand && !targetTask) {
+        const errorLog: MailLog = {
           id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           timestamp: new Date().toISOString(),
           sender: from,
           subject: subject,
-          action: 'UPDATED',
-          details: `收到回覆信件但找不到對應工單 (狀態指令: ${parsed.statusCommand || '無'})，已安全忽略主旨中的歷史點名，避免重複建單`,
+          action: 'ERROR',
+          details: `指定的工單識別碼 ${refTicket} 不存在，無法執行狀態變更`,
           rawSnippet: parsed.cleanContent.substring(0, 150),
         };
-        state.mailLogs.unshift(orphanLog);
+        state.mailLogs.unshift(errorLog);
 
         return {
-          status: 'IGNORED_REPLY',
-          message: '此信件為既有郵件之回覆，但未找到匹配的工單，已安全忽略以避免重複建單',
+          status: 'NOT_FOUND',
+          message: `指定的工單號碼 ${refTicket} 不存在，無法執行狀態變更`,
         };
       }
+
+      // 只要歷史紀錄中沒有建立過工單（無論信件是否為 FW、轉寄、Re 或新信），皆應正式建立新工單！
+
+      // 計算新工單內容 (若為轉寄信件且附帶轉寄引文，完整保留以利受派人排查)
+      const initialTaskContent =
+        parsed.isForward && parsed.fullBody && parsed.fullBody !== parsed.cleanContent
+          ? `${parsed.cleanContent}\n\n--- 轉寄郵件原始內容 ---\n${parsed.fullBody}`.trim()
+          : (parsed.cleanContent || parsed.fullBody || '(無內文)');
 
       // 4. 新信件派工流程
       const createdTasks: Task[] = [];
@@ -273,7 +320,7 @@ export async function POST(req: NextRequest) {
             receivedAt: parsed.receivedAt,
             messageId,
             inReplyTo,
-            cleanContent: parsed.cleanContent,
+            cleanContent: initialTaskContent,
             mentionedMembers: parsed.mentions.map((m) => m.member.name),
             history: [
               {
@@ -360,7 +407,7 @@ export async function POST(req: NextRequest) {
           receivedAt: parsed.receivedAt,
           messageId,
           inReplyTo,
-          cleanContent: parsed.cleanContent,
+          cleanContent: initialTaskContent,
           mentionedMembers: [],
           history: [
             {

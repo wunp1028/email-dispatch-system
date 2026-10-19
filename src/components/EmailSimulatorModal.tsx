@@ -44,7 +44,9 @@ export const EmailSimulatorModal: React.FC<EmailSimulatorModalProps> = ({
   const [dispatchResult, setDispatchResult] = useState<any>(null);
 
   // 預設快速範本
-  const loadPreset = (type: 'DIRECT_MULTI' | 'AUTO_ROSTER' | 'REPLY_UPDATE' | 'SPAM_BLOCKED') => {
+  const loadPreset = (
+    type: 'DIRECT_MULTI' | 'AUTO_ROSTER' | 'REPLY_UPDATE' | 'SPAM_BLOCKED' | 'OUTLOOK_FW' | 'OUTLOOK_QP'
+  ) => {
     setDispatchResult(null);
     switch (type) {
       case 'DIRECT_MULTI':
@@ -55,6 +57,29 @@ export const EmailSimulatorModal: React.FC<EmailSimulatorModalProps> = ({
           '請 @建宏 P1 處理登入錯誤排查，同時請 @Alex P2 產出週報數據。\n\n' +
             '在 2026-10-17 11:20:00 Emily Wang 寫道：\n' +
             '> 請問昨日登入問題有進展嗎？'
+        );
+        break;
+      case 'OUTLOOK_FW':
+        setSender('david@vip-client.com');
+        setSenderName('David Lee');
+        setSubject('FW: [外部] 客戶端資料庫連線逾時排查需求');
+        setBody(
+          '請 @Alex P1 協助排查此轉寄案件，謝謝！\n\n' +
+            '-----Original Message-----\n' +
+            'From: client-service@vip-client.com\n' +
+            'Sent: Monday, October 19, 2026 09:30 AM\n' +
+            'Subject: 客戶端資料庫連線逾時排查需求\n\n' +
+            '您好，我們今早發現生產資料庫連線持續出現 Timeout 報錯，請儘速協助修復。'
+        );
+        break;
+      case 'OUTLOOK_QP':
+        setSender('david@vip-client.com');
+        setSenderName('=?UTF-8?B?RGF2aWQgTGVl?=');
+        setSubject('=?UTF-8?Q?=E7=B7=8A=E6=80=A5=E5=AE=A2=E6=88=B6=E7=95=B0=E5=B8=B8=E6=8E=92=E6=9F=A5?=');
+        setBody(
+          'Content-Type: text/plain; charset="utf-8"\n' +
+            'Content-Transfer-Encoding: quoted-printable\n\n' +
+            '=E8=AB=8B=20@Alex=20P1=20=E5=8D=94=E5=8A=A9=E6=8E=92=E6=9F=A5=EF=BC=8C=E8=AC=9D=E8=AC=9D=EF=BC=81'
         );
         break;
       case 'AUTO_ROSTER':
@@ -166,6 +191,20 @@ export const EmailSimulatorModal: React.FC<EmailSimulatorModalProps> = ({
             className="text-xs bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 px-2.5 py-1 rounded-md border border-slate-200 transition font-medium"
           >
             🎯 指定派單 (@建宏 P1 @Alex P2)
+          </button>
+          <button
+            type="button"
+            onClick={() => loadPreset('OUTLOOK_FW')}
+            className="text-xs bg-slate-100 hover:bg-amber-50 hover:text-amber-700 px-2.5 py-1 rounded-md border border-slate-200 transition font-medium"
+          >
+            📨 Outlook 轉寄新單 (FW: 依歷史主旨識別)
+          </button>
+          <button
+            type="button"
+            onClick={() => loadPreset('OUTLOOK_QP')}
+            className="text-xs bg-slate-100 hover:bg-violet-50 hover:text-violet-700 px-2.5 py-1 rounded-md border border-slate-200 transition font-medium"
+          >
+            🔤 Outlook QP中文防亂碼 (=E8=AB=8B...)
           </button>
           <button
             type="button"
